@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+!deploy/python/*.pyd
 logs/*.jsonl
 db/
 dist/
