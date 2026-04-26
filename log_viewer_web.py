@@ -300,6 +300,13 @@ def _status_badge(status: str) -> str:
 def _pi_badge(has_pi: bool) -> str:
     return '<span class="badge badge-pi">개인정보</span>' if has_pi else ""
 
+def _db_badge(exec_method: str) -> str:
+    if exec_method == "TNS Sniffer":
+        return '<span class="badge" style="background:#fde8c8;color:#7a3e00">Oracle</span>'
+    if exec_method == "PG Sniffer":
+        return '<span class="badge" style="background:#dce8fb;color:#0d47a1">PG</span>'
+    return f'<span class="badge badge-gray">{_esc(exec_method)}</span>' if exec_method else ""
+
 
 # ── 검색 폼 ──────────────────────────────────
 
@@ -311,6 +318,7 @@ def _search_form(params: dict) -> str:
     op_val   = _q(params, "op_type")
     st_val   = _q(params, "status")
     pi_val   = _q(params, "has_pi")
+    ex_val   = _q(params, "exec_method")
     kw_val   = _esc(_q(params, "keyword"))
 
     def _sel(opts: list[tuple[str,str]], cur: str) -> str:
@@ -322,6 +330,7 @@ def _search_form(params: dict) -> str:
     op_opts = _sel([("","전체"),("조회","조회"),("생성","생성"),("변경","변경"),("삭제","삭제")], op_val)
     st_opts = _sel([("","전체"),("SUCCESS","성공"),("FAILURE","실패")], st_val)
     pi_opts = _sel([("","전체"),("1","포함"),("0","미포함")], pi_val)
+    ex_opts = _sel([("","전체 DB"),("TNS Sniffer","Oracle"),("PG Sniffer","PostgreSQL")], ex_val)
 
     return f"""
 <div class="card">
@@ -348,6 +357,10 @@ def _search_form(params: dict) -> str:
       <div class="form-group">
         <label>처리 상태</label>
         <select name="status">{st_opts}</select>
+      </div>
+      <div class="form-group">
+        <label>DB 종류</label>
+        <select name="exec_method">{ex_opts}</select>
       </div>
       <div class="form-group">
         <label>개인정보 포함</label>
@@ -383,10 +396,11 @@ def _render_search(params: dict) -> str:
     except ValueError:
         fr = to = today
 
-    user_id    = _q(params, "user_id") or None
-    op_type    = _q(params, "op_type") or None
-    status     = _q(params, "status")  or None
-    keyword    = _q(params, "keyword") or None
+    user_id    = _q(params, "user_id")    or None
+    op_type    = _q(params, "op_type")    or None
+    status     = _q(params, "status")     or None
+    keyword    = _q(params, "keyword")    or None
+    exec_meth  = _q(params, "exec_method") or None
     pi_val     = _q(params, "has_pi")
     has_pi     = (True if pi_val == "1" else (False if pi_val == "0" else None))
 
@@ -394,6 +408,7 @@ def _render_search(params: dict) -> str:
         iter_logs(fr, to),
         user_id=user_id, status=status,
         operation_type=op_type, keyword=keyword, has_pi=has_pi,
+        execution_method=exec_meth,
     ))
 
     total   = len(all_entries)
@@ -434,6 +449,7 @@ def _render_search(params: dict) -> str:
             row_cnt  = e["what"].get("row_count", 0)
             ref_str  = f'<br><span style="font-size:11px;color:var(--muted)">{ref}</span>' if ref else ""
             pi_b     = _pi_badge(e["result"]["has_personal_info"])
+            db_b     = _db_badge(e["how"].get("execution_method", ""))
 
             rows.append(f"""<tr>
   <td style="text-align:center;color:var(--muted)">{i}</td>
@@ -443,6 +459,7 @@ def _render_search(params: dict) -> str:
   <td class="sql-cell">{_sql_preview_html(e["what"]["sql"])}</td>
   <td>{purp}{ref_str}</td>
   <td class="num-cell" style="text-align:right">{row_cnt:,}건</td>
+  <td style="text-align:center">{db_b}</td>
   <td style="text-align:center">{_status_badge(e["result"]["status"])}</td>
   <td style="text-align:center">{pi_b}</td>
   <td style="text-align:center"><a href="/detail?id={_esc(e["log_id"])}&from_dt={fr_str}&to_dt={to_str}">▶ 상세</a></td>
@@ -458,7 +475,7 @@ def _render_search(params: dict) -> str:
   <table>
     <thead><tr>
       <th>#</th><th>일시 (언제)</th><th>사용자 (누가)</th><th>수행업무<br>(무엇을)</th>
-      <th>SQL 요약</th><th>처리목적 (왜)</th><th>결과건수</th><th>상태</th><th>개인정보</th><th>상세</th>
+      <th>SQL 요약</th><th>처리목적 (왜)</th><th>결과건수</th><th>DB</th><th>상태</th><th>개인정보</th><th>상세</th>
     </tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
@@ -726,11 +743,12 @@ def _build_csv(params: dict) -> bytes:
 
     entries = list(filter_logs(
         iter_logs(fr, to),
-        user_id=_q(params, "user_id") or None,
-        status=_q(params, "status")   or None,
+        user_id=_q(params, "user_id")      or None,
+        status=_q(params, "status")        or None,
         operation_type=_q(params, "op_type") or None,
-        keyword=_q(params, "keyword") or None,
+        keyword=_q(params, "keyword")      or None,
         has_pi=(True if _q(params,"has_pi")=="1" else (False if _q(params,"has_pi")=="0" else None)),
+        execution_method=_q(params, "exec_method") or None,
     ))
 
     buf = io.StringIO()

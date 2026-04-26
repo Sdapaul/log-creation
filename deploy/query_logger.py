@@ -299,6 +299,7 @@ def filter_logs(
     keyword: Optional[str] = None,
     has_pi: Optional[bool] = None,
     reference_no: Optional[str] = None,
+    execution_method: Optional[str] = None,
 ):
     for e in entries:
         if user_id and e["who"]["user_id"].upper() != user_id.upper():
@@ -310,6 +311,8 @@ def filter_logs(
         if has_pi is not None and e["result"]["has_personal_info"] != has_pi:
             continue
         if reference_no and reference_no not in e["why"].get("reference_no", ""):
+            continue
+        if execution_method and e["how"].get("execution_method") != execution_method:
             continue
         if keyword:
             raw = json.dumps(e, ensure_ascii=False).lower()
