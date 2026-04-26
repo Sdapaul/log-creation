@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+logs/*.jsonl
+db/
+dist/
+build/
+*.spec
+.DS_Store
+Thumbs.db
