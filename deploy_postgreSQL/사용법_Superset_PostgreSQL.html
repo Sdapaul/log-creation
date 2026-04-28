@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DB 쿼리 감사 로그 시스템 — Superset + PostgreSQL 사용법</title>
+<style>
+/* ── 기본 리셋 ── */
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Malgun Gothic','Apple SD Gothic Neo','NanumGothic',sans-serif;
+     font-size:14px;line-height:1.7;color:#1e2433;background:#f0f4f9;display:flex}
+
+/* ── 사이드바 ── */
+#sidebar{width:230px;min-height:100vh;background:#0f1c3a;color:#c8d4e8;
+         position:fixed;top:0;left:0;overflow-y:auto;padding:0 0 40px;z-index:100;
+         display:flex;flex-direction:column}
+#sidebar-logo{padding:22px 18px 16px;border-bottom:1px solid #1e3460}
+#sidebar-logo h1{font-size:13px;color:#7eb3ff;line-height:1.4;font-weight:700}
+#sidebar-logo p{font-size:11px;color:#6b7fa8;margin-top:4px}
+#sidebar nav a{display:block;padding:8px 18px;font-size:12.5px;color:#a0b4d4;
+               text-decoration:none;border-left:3px solid transparent;transition:.15s}
+#sidebar nav a:hover{color:#fff;background:#162a55;border-left-color:#4d9fff}
+#sidebar nav a.active{color:#fff;background:#1a3566;border-left-color:#4d9fff;font-weight:600}
+#sidebar nav .nav-section{padding:14px 18px 4px;font-size:10.5px;color:#4a5f80;
+                           text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+
+/* ── 메인 콘텐츠 ── */
+#main{margin-left:230px;flex:1;min-height:100vh;padding:0}
+#content{max-width:920px;margin:0 auto;padding:36px 40px 60px}
+
+/* ── 헤더 ── */
+.page-header{background:linear-gradient(135deg,#0f1c3a 0%,#1a3566 100%);
+             color:#fff;padding:36px 40px;border-radius:10px;margin-bottom:32px;
+             box-shadow:0 4px 20px rgba(0,0,0,.25)}
+.page-header h1{font-size:22px;font-weight:700;letter-spacing:-.3px}
+.page-header .subtitle{color:#7eb3ff;font-size:13px;margin-top:6px}
+.badge-row{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+.badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:11.5px;font-weight:600}
+.badge-blue{background:#1a56c4;color:#d4e8ff}
+.badge-green{background:#0e6e3a;color:#b6f0d4}
+.badge-orange{background:#8a4800;color:#ffe4bb}
+
+/* ── 섹션 ── */
+section{margin-bottom:40px;scroll-margin-top:24px}
+h2{font-size:18px;color:#0f1c3a;border-bottom:2px solid #c5d5ef;
+   padding-bottom:8px;margin-bottom:18px;display:flex;align-items:center;gap:8px}
+h2 .sec-num{background:#1a3566;color:#7eb3ff;font-size:11px;font-weight:700;
+             padding:2px 8px;border-radius:12px;min-width:28px;text-align:center}
+h3{font-size:15px;color:#1a3566;margin:22px 0 10px;font-weight:700}
+h4{font-size:13.5px;color:#2a4a80;margin:16px 0 8px;font-weight:700}
+
+/* ── 아키텍처 다이어그램 ── */
+.arch-box{background:#0d1b35;border-radius:10px;padding:24px 28px;
+          overflow-x:auto;margin:16px 0}
+.arch-box pre{font-family:'Courier New','D2Coding',monospace;font-size:12.5px;
+              line-height:1.6;color:#c8daf0;white-space:pre}
+.arch-box .c-superset{color:#4da6ff}
+.arch-box .c-proxy{color:#4dff91}
+.arch-box .c-pg{color:#ffd04d}
+.arch-box .c-log{color:#ff8c4d}
+.arch-box .c-viewer{color:#c87dff}
+.arch-box .c-user{color:#ff6b9e}
+
+/* ── 비교 카드 ── */
+.method-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+.method-card{border-radius:8px;padding:18px;border:2px solid}
+.method-card.recommended{background:#e8f4e8;border-color:#2a8a2a}
+.method-card.alternative{background:#f0f0ff;border-color:#5555bb}
+.method-card h4{margin:0 0 10px;font-size:14px}
+.method-card.recommended h4{color:#1a6a1a}
+.method-card.alternative h4{color:#3333aa}
+.method-tag{display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;
+            font-weight:700;margin-bottom:8px}
+.tag-rec{background:#1a6a1a;color:#fff}
+.tag-alt{background:#3333aa;color:#fff}
+.method-card ul{padding-left:16px;font-size:13px}
+.method-card li{margin:3px 0}
+
+/* ── 테이블 ── */
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
+th{background:#1a3566;color:#d4e8ff;padding:9px 12px;text-align:left;font-weight:600}
+td{border:1px solid #c5d5ef;padding:8px 12px;vertical-align:top}
+tr:nth-child(even) td{background:#f5f8fd}
+td code{background:#e8edf8;padding:1px 5px;border-radius:3px;color:#c0392b;font-size:12px}
+
+/* ── 코드 블록 ── */
+.code-wrap{position:relative;margin:14px 0}
+.code-wrap pre{background:#1e2433;color:#e0e8f8;padding:16px 18px;border-radius:8px;
+               overflow-x:auto;font-size:12.5px;line-height:1.6;
+               font-family:'Courier New','D2Coding',monospace}
+.copy-btn{position:absolute;top:8px;right:10px;background:#2a4a80;color:#c8d8f0;
+          border:none;padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer;
+          font-family:inherit;transition:.15s}
+.copy-btn:hover{background:#4d9fff;color:#fff}
+.copy-btn.copied{background:#0e6e3a;color:#b6f0d4}
+code{background:#e8edf8;padding:2px 6px;border-radius:3px;color:#c0392b;font-size:12.5px;
+     font-family:'Courier New',monospace}
+pre code{background:transparent;color:inherit;padding:0;font-size:inherit}
+
+/* ── 알림 박스 ── */
+.info-box{border-left:4px solid;border-radius:0 6px 6px 0;padding:12px 16px;margin:14px 0;font-size:13px}
+.info-box.important{background:#fff8e1;border-color:#f0a500;color:#5a3e00}
+.info-box.warning{background:#ffeaea;border-color:#d32f2f;color:#5a0000}
+.info-box.tip{background:#e8f5e9;border-color:#2a8a2a;color:#0a3a0a}
+.info-box.note{background:#e8edf8;border-color:#1a56c4;color:#0a1a3a}
+.info-box strong{font-weight:700}
+
+/* ── 단계별 절차 ── */
+.steps{counter-reset:step;list-style:none;padding:0;margin:14px 0}
+.steps li{counter-increment:step;display:flex;gap:14px;margin-bottom:16px}
+.steps li::before{content:counter(step);background:#1a3566;color:#fff;
+                  min-width:26px;height:26px;border-radius:50%;display:flex;
+                  align-items:center;justify-content:center;font-size:12px;
+                  font-weight:700;flex-shrink:0;margin-top:1px}
+.steps li .step-body{flex:1}
+.steps li .step-title{font-weight:700;color:#0f1c3a;font-size:14px;margin-bottom:4px}
+
+/* ── 체크리스트 ── */
+.checklist{list-style:none;padding:0;margin:14px 0}
+.checklist li{display:flex;align-items:flex-start;gap:10px;padding:7px 12px;
+              margin:4px 0;border-radius:6px;font-size:13px}
+.checklist li:nth-child(odd){background:#f5f8fd}
+.checklist li::before{content:'☐';font-size:16px;color:#4d9fff;flex-shrink:0;line-height:1.3}
+.checklist li.done::before{content:'☑';color:#2a8a2a}
+
+/* ── 배포 구조 트리 ── */
+.tree{background:#0d1b35;color:#c8daf0;padding:20px 24px;border-radius:8px;
+      font-family:'Courier New',monospace;font-size:12.5px;line-height:1.7;margin:14px 0}
+.tree .t-dir{color:#ffd04d;font-weight:700}
+.tree .t-file{color:#c8daf0}
+.tree .t-comment{color:#4a6a9a;font-style:italic}
+.tree .t-star{color:#ff8c4d;font-weight:700}
+
+/* ── 하이라이트 텍스트 ── */
+strong{color:#0f1c3a;font-weight:700}
+.hl{color:#1a56c4;font-weight:700}
+.hl-red{color:#c0392b;font-weight:700}
+.hl-green{color:#1a6a1a;font-weight:700}
+
+/* ── 반응형 ── */
+@media(max-width:768px){
+  #sidebar{display:none}
+  #main{margin-left:0}
+  #content{padding:20px}
+  .method-grid{grid-template-columns:1fr}
+}
+
+/* ── 인쇄 ── */
+@media print{
+  #sidebar{display:none}
+  #main{margin-left:0}
+  .copy-btn{display:none}
+}
+
+/* ── 스크롤 부드럽게 ── */
+html{scroll-behavior:smooth}
+</style>
+</head>
+<body>
+
+<!-- ══════════════ 사이드바 ══════════════ -->
+<div id="sidebar">
+  <div id="sidebar-logo">
+    <h1>DB 쿼리 감사 로그<br>Superset + PostgreSQL</h1>
+    <p>v1.0 · Azure RedHat 9.7</p>
+  </div>
+  <nav>
+    <div class="nav-section">개요</div>
+    <a href="#overview">1. 시스템 개요</a>
+    <a href="#architecture">2. 아키텍처</a>
+    <a href="#folder">3. 배포 폴더 구성</a>
+
+    <div class="nav-section">설치 · 설정</div>
+    <a href="#deploy">4. 폐쇄망 반입 절차</a>
+    <a href="#config">5. config.py 설정</a>
+
+    <div class="nav-section">감사 수집</div>
+    <a href="#proxy">6. 방식A: pg_proxy (권장)</a>
+    <a href="#sniffer">7. 방식B: pg_sniffer</a>
+
+    <div class="nav-section">로그 조회</div>
+    <a href="#webviewer">8. 웹 뷰어 설정</a>
+    <a href="#webaccess">9. 사용자 PC 접속</a>
+
+    <div class="nav-section">운영</div>
+    <a href="#checklist">10. 운영 체크리스트</a>
+    <a href="#security">11. 보안 고려사항</a>
+    <a href="#schema">12. 로그 스키마</a>
+  </nav>
+</div>
+
+<!-- ══════════════ 메인 ══════════════ -->
+<div id="main">
+<div id="content">
+
+<!-- ── 헤더 ── -->
+<div class="page-header">
+  <h1>DB 쿼리 감사 로그 시스템</h1>
+  <div class="subtitle">Apache Superset + PostgreSQL 전용 사용법 · Azure Cloud / RedHat 9.7</div>
+  <div class="badge-row">
+    <span class="badge badge-blue">Python 표준 라이브러리 전용</span>
+    <span class="badge badge-green">외부 패키지 없음</span>
+    <span class="badge badge-orange">비암호화 연결(sslmode=disable) 전용</span>
+  </div>
+</div>
+
+<!-- ══════════════ 1. 시스템 개요 ══════════════ -->
+<section id="overview">
+<h2><span class="sec-num">1</span> 시스템 개요</h2>
+
+<p>Apache Superset이 PostgreSQL에 실행하는 모든 쿼리를 <strong>6하원칙(누가·언제·어디서·무엇을·어떻게·왜)</strong>에 따라 자동으로 로그 파일에 기록한다. Superset 소스코드와 PostgreSQL 서버 설정을 변경하지 않고 적용할 수 있다.</p>
+
+<table>
+  <tr><th>항목</th><th>내용</th></tr>
+  <tr><td>감사 대상</td><td>Superset → PostgreSQL 모든 SQL (SELECT / DML / DDL)</td></tr>
+  <tr><td>대상 DB 서버</td><td>Azure Cloud / RedHat 9.7 / PostgreSQL</td></tr>
+  <tr><td>암호화 전제</td><td>Superset ↔ PostgreSQL 간 <strong>비암호화 연결</strong> (<code>sslmode=disable</code>)</td></tr>
+  <tr><td>외부 패키지</td><td><strong>없음</strong> — Python 표준 라이브러리만 사용</td></tr>
+  <tr><td>로그 형식</td><td>JSON Lines (.jsonl), 일별 파일 로테이션, SHA-256 무결성 해시</td></tr>
+  <tr><td>조회 방법</td><td>웹 브라우저(포트 8888) 또는 CLI</td></tr>
+</table>
+</section>
+
+<!-- ══════════════ 2. 아키텍처 ══════════════ -->
+<section id="architecture">
+<h2><span class="sec-num">2</span> 아키텍처</h2>
+
+<h3>전체 구성도</h3>
+<div class="arch-box">
+<pre>
+  <span class="c-superset">┌────────────────────────────────────────────────────────────────────────────┐</span>
+  <span class="c-superset">│                       폐쇄망 내부 (Azure Cloud)                             │</span>
+  <span class="c-superset">│                                                                            │</span>
+  <span class="c-superset">│   ┌──────────────────┐                                                     │</span>
+  <span class="c-superset">│   │  Apache Superset │</span>  ── 방식 A: URI 변경 필요 ──────────────────────▶  <span class="c-superset">│</span>
+  <span class="c-superset">│   │  (대시보드 앱)    │</span>                                                      <span class="c-superset">│</span>
+  <span class="c-superset">│   └──────────────────┘</span>                                                      <span class="c-superset">│</span>
+  <span class="c-superset">│            │ TCP:5433 (평문)</span>                                               <span class="c-superset">│</span>
+  <span class="c-superset">│            ▼</span>                                                               <span class="c-superset">│</span>
+  <span class="c-proxy">│   ┌──────────────────────────────────────────────────────────────────────┐  │</span>
+  <span class="c-proxy">│   │  [방식 A] pg_proxy.py  (권장 — root 권한 불필요)                      │  │</span>
+  <span class="c-proxy">│   │  listen: 0.0.0.0:5433  →  PostgreSQL:5432                           │  │</span>
+  <span class="c-proxy">│   │  PostgreSQL Wire Protocol v3 파싱 → SQL 추출 → 로그 기록              │  │</span>
+  <span class="c-proxy">│   └───────────────────────────────┬──────────────────────────────────────┘  │</span>
+  <span class="c-pg">│                                   │ TCP:5432 (평문)</span>                        <span class="c-pg">│</span>
+  <span class="c-pg">│   ┌───────────────────────────────▼──────────────────────────────────────┐  │</span>
+  <span class="c-pg">│   │  PostgreSQL 서버  (RedHat 9.7 / Azure)  port 5432                    │  │</span>
+  <span class="c-pg">│   └──────────────────────────────────────────────────────────────────────┘  │</span>
+  <span class="c-log">│            │  OS 패킷 (방식 B 선택 시)</span>                                      <span class="c-log">│</span>
+  <span class="c-log">│            ▼</span>                                                               <span class="c-log">│</span>
+  <span class="c-log">│   ┌──────────────────────────────────────────────────────────────────────┐  │</span>
+  <span class="c-log">│   │  [방식 B] pg_sniffer.py  (PG 서버 직접, root 필요)                    │  │</span>
+  <span class="c-log">│   └───────────────────────────────┬──────────────────────────────────────┘  │</span>
+  <span class="c-log">│                                   │</span>                                        <span class="c-log">│</span>
+  <span class="c-log">│                      logs/audit_query_YYYYMMDD.jsonl</span>                      <span class="c-log">│</span>
+  <span class="c-log">│                                   │</span>                                        <span class="c-log">│</span>
+  <span class="c-viewer">│   ┌───────────────────────────────▼──────────────────────────────────────┐  │</span>
+  <span class="c-viewer">│   │  log_viewer_web.py   HTTP listen: 0.0.0.0:8888                       │  │</span>
+  <span class="c-viewer">│   └───────────────────────────────┬──────────────────────────────────────┘  │</span>
+  <span class="c-superset">│                                   │</span>                                        <span class="c-superset">│</span>
+  <span class="c-superset">└───────────────────────────────────│────────────────────────────────────────┘</span>
+                                      <span class="c-user">│ HTTP:8888 (내부망)</span>
+                           <span class="c-user">┌──────────▼────────────┐</span>
+                           <span class="c-user">│   사용자 PC 웹 브라우저  │</span>
+                           <span class="c-user">│  http://서버IP:8888   │</span>
+                           <span class="c-user">└───────────────────────┘</span>
+</pre>
+</div>
+
+<h3>감사 방식 비교</h3>
+<div class="method-grid">
+  <div class="method-card recommended">
+    <span class="method-tag tag-rec">★ 방식 A — 권장</span>
+    <h4>pg_proxy.py (TCP 프록시)</h4>
+    <ul>
+      <li>Superset과 PG 사이 TCP 프록시 삽입</li>
+      <li><strong>root 권한 불필요</strong></li>
+      <li>PG 서버 설정 변경 없음</li>
+      <li>Superset DB URI 변경 필요</li>
+      <li>PG 서버 또는 별도 서버에서 실행</li>
+    </ul>
+  </div>
+  <div class="method-card alternative">
+    <span class="method-tag tag-alt">방식 B</span>
+    <h4>pg_sniffer.py (패킷 스니퍼)</h4>
+    <ul>
+      <li>OS raw socket으로 패킷 감청</li>
+      <li><strong>root 또는 CAP_NET_RAW 필요</strong></li>
+      <li>Superset 설정 변경 없음</li>
+      <li>PG 서버에만 설치 가능</li>
+      <li>SELinux Enforcing 시 추가 설정 필요</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════ 3. 배포 폴더 구성 ══════════════ -->
+<section id="folder">
+<h2><span class="sec-num">3</span> 배포 폴더 구성</h2>
+
+<p>아래 <strong>deploy_postgreSQL 폴더 전체</strong>를 폐쇄망 서버에 복사한다. Oracle 관련 파일은 포함되지 않는다.</p>
+
+<div class="tree">
+<span class="t-dir">deploy_postgreSQL/</span>  ← <span class="t-comment">이 폴더 전체를 서버에 복사</span>
+│
+├── <span class="t-star t-file">config.py</span>              <span class="t-comment">★ 가장 먼저 수정 (PG_HOST, PG_DB 등)</span>
+├── <span class="t-file">query_logger.py</span>        <span class="t-comment">로그 기록·읽기·검증 핵심 엔진</span>
+│
+├── <span class="t-file">pg_proxy.py</span>            <span class="t-comment">[방식 A] 감사 프록시 (root 불필요)</span>
+├── <span class="t-file">pg_sniffer.py</span>          <span class="t-comment">[방식 B] 패킷 스니퍼 (root 필요)</span>
+│
+├── <span class="t-file">log_viewer_web.py</span>      <span class="t-comment">웹 뷰어 서버 (포트 8888)</span>
+├── <span class="t-file">log_viewer.py</span>          <span class="t-comment">CLI 뷰어</span>
+│
+├── <span class="t-file">run_pg_proxy.sh</span>        <span class="t-comment">[방식 A] Linux 런처</span>
+├── <span class="t-file">run_pg_proxy.bat</span>       <span class="t-comment">[방식 A] Windows 런처</span>
+├── <span class="t-file">run_pg_sniffer.sh</span>      <span class="t-comment">[방식 B] Linux 런처</span>
+├── <span class="t-file">run_pg_sniffer.bat</span>     <span class="t-comment">[방식 B] Windows 런처</span>
+├── <span class="t-file">run_viewer_web.sh</span>      <span class="t-comment">웹 뷰어 Linux 런처</span>
+├── <span class="t-file">run_viewer_web.bat</span>     <span class="t-comment">웹 뷰어 Windows 런처</span>
+├── <span class="t-file">run_viewer_cli.sh</span>      <span class="t-comment">CLI 뷰어 Linux 런처</span>
+│
+├── <span class="t-file">prepare_offline.sh</span>     <span class="t-comment">Python 없을 때 RPM 다운로드 스크립트</span>
+├── <span class="t-star t-file">사용법_Superset_PostgreSQL.html</span>  <span class="t-comment">★ 이 파일</span>
+│
+└── <span class="t-dir">logs/</span>                  <span class="t-comment">감사 로그 저장 (자동 생성)</span>
+</div>
+</section>
+
+<!-- ══════════════ 4. 폐쇄망 반입 절차 ══════════════ -->
+<section id="deploy">
+<h2><span class="sec-num">4</span> 폐쇄망 반입 절차</h2>
+
+<h3>사전 확인 — 대상 서버에서 실행</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># 1. OS 버전
+cat /etc/os-release | grep -E "NAME|VERSION"
+
+# 2. Python 설치 여부 (3.8 이상이면 추가 준비 불필요)
+python3 --version
+
+# 3. PostgreSQL 포트 확인
+sudo ss -tlnp | grep 5432
+
+# 4. PostgreSQL SSL 설정 확인 (반드시 off 여야 함)
+sudo -u postgres psql -c "SHOW ssl;"
+
+# 5. SELinux 상태 (Enforcing이면 방식 B raw socket 차단 가능)
+getenforce
+
+# 6. 방화벽 포트 확인 (8888 웹뷰어용)
+sudo firewall-cmd --list-all</code></pre>
+</div>
+
+<div class="info-box note">
+  <strong>RedHat 9.7</strong> 은 Python 3.9 이상이 기본 설치되어 있으므로 대부분 <code>python3</code>만 확인하면 된다.
+</div>
+
+<h3>반입 절차</h3>
+<ol class="steps">
+  <li>
+    <div class="step-body">
+      <div class="step-title">Python이 없을 경우 — 외부망에서 RPM 다운로드</div>
+      <div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># 외부망 PC (RedHat 계열) 에서 실행
+dnf download --resolve python3
+
+# 생성된 *.rpm 파일을 USB에 담아 반입 후 내부망 서버에서:
+sudo rpm -ivh *.rpm</code></pre>
+      </div>
+    </div>
+  </li>
+  <li>
+    <div class="step-body">
+      <div class="step-title">deploy_postgreSQL 폴더를 서버로 복사</div>
+      <div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># USB 또는 내부 파일 전송
+cp -r /media/usb/deploy_postgreSQL/ /opt/audit/
+
+# 또는 SCP (같은 내부망에서)
+scp -r deploy_postgreSQL/ audit@10.0.0.5:/opt/audit/</code></pre>
+      </div>
+    </div>
+  </li>
+  <li>
+    <div class="step-body">
+      <div class="step-title">config.py 수정 (다음 섹션 참고)</div>
+      <div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>cd /opt/audit/deploy_postgreSQL
+vi config.py</code></pre>
+      </div>
+    </div>
+  </li>
+  <li>
+    <div class="step-body">
+      <div class="step-title">감사 수집 프로그램 실행 (방식 선택)</div>
+      <div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># 방식 A (권장)
+bash run_pg_proxy.sh --pg-host 127.0.0.1 --pg-port 5432 --listen-port 5433
+
+# 방식 B
+bash run_pg_sniffer.sh --pg-port 5432 --db-name superset_db</code></pre>
+      </div>
+    </div>
+  </li>
+  <li>
+    <div class="step-body">
+      <div class="step-title">웹 뷰어 실행</div>
+      <div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>bash run_viewer_web.sh --host 0.0.0.0 --port 8888</code></pre>
+      </div>
+    </div>
+  </li>
+</ol>
+</section>
+
+<!-- ══════════════ 5. config.py ══════════════ -->
+<section id="config">
+<h2><span class="sec-num">5</span> config.py 설정</h2>
+
+<div class="info-box important">
+  <strong>이 파일을 가장 먼저 수정한다.</strong> 기본값은 localhost이므로 실제 서버 정보로 변경해야 한다.
+</div>
+
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># ── PostgreSQL 연결 정보 ────────────────────────────────────────────
+PG_HOST   = "10.0.0.5"        # ★ 실제 PostgreSQL 서버 IP
+PG_PORT   = 5432               # PostgreSQL 리스너 포트 (기본 5432)
+PG_DB     = "superset_db"     # ★ 실제 데이터베이스 이름
+PG_SCHEMA = "public"          # 감사할 스키마 (보통 public)
+
+# ── 로그 저장 경로 ──────────────────────────────────────────────────
+LOG_DIR = Path("/opt/audit/logs")   # ★ 절대경로 권장</code></pre>
+</div>
+
+<h3>현재 스키마 확인 SQL</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>-- PostgreSQL에서 실행
+SELECT schema_name FROM information_schema.schemata ORDER BY 1;
+SELECT DISTINCT table_schema FROM information_schema.tables
+  WHERE table_type = 'BASE TABLE' ORDER BY 1;</code></pre>
+</div>
+</section>
+
+<!-- ══════════════ 6. 방식 A: pg_proxy ══════════════ -->
+<section id="proxy">
+<h2><span class="sec-num">6</span> 방식 A: pg_proxy.py (권장)</h2>
+
+<h3>실행</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>python3 pg_proxy.py \
+    --pg-host 127.0.0.1 \        # PostgreSQL 실제 주소
+    --pg-port 5432 \              # PostgreSQL 실제 포트
+    --listen-port 5433 \          # Superset이 접속할 포트
+    --db-name superset_db \       # 로그에 기록할 DB명
+    --db-schema public            # 로그에 기록할 스키마명</code></pre>
+</div>
+
+<table>
+  <tr><th>파라미터</th><th>설명</th><th>기본값</th></tr>
+  <tr><td><code>--listen-host</code></td><td>프록시 바인딩 주소</td><td>0.0.0.0</td></tr>
+  <tr><td><code>--listen-port</code></td><td>Superset이 접속할 포트</td><td>5433</td></tr>
+  <tr><td><code>--pg-host</code></td><td>실제 PostgreSQL 서버 IP</td><td>config.py PG_HOST</td></tr>
+  <tr><td><code>--pg-port</code></td><td>실제 PostgreSQL 포트</td><td>5432</td></tr>
+  <tr><td><code>--db-name</code></td><td>로그용 DB명</td><td>config.py PG_DB</td></tr>
+  <tr><td><code>--db-schema</code></td><td>로그용 스키마명</td><td>config.py PG_SCHEMA</td></tr>
+</table>
+
+<h3>Superset DB URI 변경</h3>
+<div class="info-box important">
+  <strong>방식 A 사용 시 이 단계가 필수다.</strong> URI를 변경해야 Superset의 쿼리가 프록시를 경유한다.
+</div>
+
+<p>Superset 관리 화면: <strong>Settings → Database Connections → 대상 DB 선택 → Edit</strong></p>
+
+<table>
+  <tr><th></th><th>SQLAlchemy URI</th></tr>
+  <tr><td><span class="hl-red">변경 전</span></td>
+      <td><code>postgresql+psycopg2://user:password@<b>10.0.0.5:5432</b>/superset_db</code></td></tr>
+  <tr><td><span class="hl-green">변경 후</span></td>
+      <td><code>postgresql+psycopg2://user:password@<b>10.0.0.5:5433</b>/superset_db<b>?sslmode=disable</b></code></td></tr>
+</table>
+
+<div class="info-box warning">
+  <strong>sslmode=disable 을 반드시 명시한다.</strong> 생략 시 Superset/SQLAlchemy가 SSL을 먼저 시도하고, 프록시가 SSL 세션을 감지하면 해당 연결의 SQL 추출을 중단한다.
+</div>
+
+<h3>systemd 서비스 등록 (자동 시작)</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>sudo tee /etc/systemd/system/pg-audit-proxy.service &lt;&lt; 'EOF'
+[Unit]
+Description=PostgreSQL Audit Proxy for Superset
+After=network.target postgresql.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/audit/deploy_postgreSQL/pg_proxy.py \
+    --pg-host 127.0.0.1 \
+    --pg-port 5432 \
+    --listen-port 5433 \
+    --db-name superset_db \
+    --db-schema public
+WorkingDirectory=/opt/audit/deploy_postgreSQL
+Restart=always
+RestartSec=5
+User=audituser
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now pg-audit-proxy
+sudo systemctl status pg-audit-proxy</code></pre>
+</div>
+</section>
+
+<!-- ══════════════ 7. 방식 B: pg_sniffer ══════════════ -->
+<section id="sniffer">
+<h2><span class="sec-num">7</span> 방식 B: pg_sniffer.py</h2>
+
+<h3>실행</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>sudo python3 pg_sniffer.py \
+    --pg-port 5432 \
+    --db-server 10.0.0.5 \       # 로그용 PG 서버 표시명
+    --db-name superset_db \
+    --db-schema public</code></pre>
+</div>
+
+<h3>root 없이 실행 (CAP_NET_RAW)</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># python3에 CAP_NET_RAW capability 부여 (1회 실행)
+sudo setcap cap_net_raw+ep /usr/bin/python3
+
+# 이후 일반 계정으로 실행 가능
+python3 pg_sniffer.py --pg-port 5432 --db-name superset_db</code></pre>
+</div>
+
+<h3>SELinux Enforcing 환경 추가 설정</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># SELinux 상태 확인
+getenforce
+
+# Permissive 모드로 임시 전환 (테스트용)
+sudo setenforce 0
+
+# 영구적으로 Permissive 로 변경 (/etc/selinux/config 수정)
+sudo sed -i 's/SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config</code></pre>
+</div>
+
+<h3>systemd 서비스 등록</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>sudo tee /etc/systemd/system/pg-audit-sniffer.service &lt;&lt; 'EOF'
+[Unit]
+Description=PostgreSQL Audit Sniffer for Superset
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/audit/deploy_postgreSQL/pg_sniffer.py \
+    --pg-port 5432 \
+    --db-name superset_db \
+    --db-schema public
+WorkingDirectory=/opt/audit/deploy_postgreSQL
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now pg-audit-sniffer</code></pre>
+</div>
+</section>
+
+<!-- ══════════════ 8. 웹 뷰어 서버 설정 ══════════════ -->
+<section id="webviewer">
+<h2><span class="sec-num">8</span> 웹 뷰어 서버 설정 (감사 서버에서)</h2>
+
+<h3>실행</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># 모든 IP에서 접속 허용 (방화벽으로 IP 제한 권장)
+python3 log_viewer_web.py --host 0.0.0.0 --port 8888
+
+# 런처 스크립트
+bash run_viewer_web.sh --host 0.0.0.0 --port 8888</code></pre>
+</div>
+
+<h3>systemd 서비스 등록</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code>sudo tee /etc/systemd/system/audit-log-viewer.service &lt;&lt; 'EOF'
+[Unit]
+Description=Audit Log Web Viewer
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/audit/deploy_postgreSQL/log_viewer_web.py \
+    --host 0.0.0.0 --port 8888
+WorkingDirectory=/opt/audit/deploy_postgreSQL
+Restart=always
+RestartSec=5
+User=audituser
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now audit-log-viewer
+sudo systemctl status audit-log-viewer</code></pre>
+</div>
+
+<h3>방화벽 설정 — 조회 담당자 IP만 허용 (RedHat 9 / firewalld)</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># 특정 IP 대역만 8888 허용 (예: 192.168.10.0/24)
+sudo firewall-cmd --permanent --add-rich-rule='
+  rule family="ipv4"
+  source address="192.168.10.0/24"
+  port protocol="tcp" port="8888"
+  accept'
+sudo firewall-cmd --reload
+
+# 설정 확인
+sudo firewall-cmd --list-rich-rules</code></pre>
+</div>
+
+<div class="info-box warning">
+  <strong>전체 IP 허용 금지.</strong> 웹 뷰어는 인증 기능이 없으므로 방화벽에서 조회 담당자 IP만 반드시 제한한다.
+</div>
+</section>
+
+<!-- ══════════════ 9. 사용자 PC 접속 ══════════════ -->
+<section id="webaccess">
+<h2><span class="sec-num">9</span> 사용자 PC 브라우저 접속</h2>
+
+<h3>접속 URL</h3>
+<div class="code-wrap">
+<pre><code>http://&lt;PG서버IP&gt;:8888
+
+예시: http://10.0.0.5:8888</code></pre>
+</div>
+
+<h3>접속 안 될 때 확인</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># 서버에서: 포트 리스닝 확인
+ss -tlnp | grep 8888
+
+# 사용자 PC (Windows)에서: 연결 테스트
+Test-NetConnection -ComputerName 10.0.0.5 -Port 8888
+
+# 사용자 PC (Linux/Mac)에서:
+nc -zv 10.0.0.5 8888</code></pre>
+</div>
+
+<h3>웹 뷰어 주요 화면</h3>
+<table>
+  <tr><th>화면</th><th>URL</th><th>기능</th></tr>
+  <tr><td>로그 검색</td><td><code>http://서버IP:8888/</code></td><td>기간·사용자·업무유형·개인정보 필터 검색</td></tr>
+  <tr><td>상세 조회</td><td><code>http://서버IP:8888/detail?id=...</code></td><td>6하원칙 전체 + SQL + 결과 데이터</td></tr>
+  <tr><td>무결성 검증</td><td><code>http://서버IP:8888/verify</code></td><td>SHA-256 해시 일괄 검증</td></tr>
+  <tr><td>CSV 내보내기</td><td><code>http://서버IP:8888/export</code></td><td>BOM UTF-8 CSV 다운로드</td></tr>
+</table>
+
+<h3>개인정보 마스킹 토글</h3>
+<p>검색·상세 화면 상단 <strong>「개인정보 마스킹」 체크박스</strong>를 클릭하면 서버 재요청 없이 브라우저에서 즉시 마스킹/원문을 전환한다. (주민번호·카드번호·계좌번호·전화번호·이메일 5개 유형 자동 탐지)</p>
+
+<h3>DB 종류 필터</h3>
+<p>감사 방식별로 <code>execution_method</code> 필드를 기준으로 필터할 수 있다.</p>
+<table>
+  <tr><th>execution_method 값</th><th>수집 방식</th></tr>
+  <tr><td><code>PG Proxy</code></td><td>pg_proxy.py (방식 A)</td></tr>
+  <tr><td><code>PG Sniffer</code></td><td>pg_sniffer.py (방식 B)</td></tr>
+</table>
+</section>
+
+<!-- ══════════════ 10. 운영 체크리스트 ══════════════ -->
+<section id="checklist">
+<h2><span class="sec-num">10</span> 운영 체크리스트</h2>
+
+<h4>초기 설치</h4>
+<ul class="checklist">
+  <li><code>config.py</code> 수정 완료 (PG_HOST, PG_PORT, PG_DB, PG_SCHEMA, LOG_DIR)</li>
+  <li>PostgreSQL SSL 확인 완료 (<code>SHOW ssl;</code> → <code>off</code>)</li>
+  <li><code>logs/</code> 디렉토리 쓰기 권한 확인 (<code>chmod 700 logs/</code>)</li>
+  <li>[방식 A] pg_proxy.py 실행 확인 → Superset DB URI 변경 → 연결 테스트 성공</li>
+  <li>[방식 B] pg_sniffer.py 실행 (root 또는 CAP_NET_RAW 확인)</li>
+  <li>Superset에서 쿼리 실행 → <code>logs/*.jsonl</code> 파일 생성 확인</li>
+  <li>웹 뷰어 실행 → 사용자 PC 브라우저에서 <code>http://서버IP:8888</code> 접속 성공</li>
+  <li>방화벽 8888 포트 → 조회 담당자 IP만 허용 확인</li>
+</ul>
+
+<h4>서비스 등록</h4>
+<ul class="checklist">
+  <li>systemd 서비스 등록 완료 (pg-audit-proxy 또는 pg-audit-sniffer)</li>
+  <li>systemd 서비스 등록 완료 (audit-log-viewer)</li>
+  <li>서버 재부팅 후 자동 시작 확인 (<code>systemctl status</code>)</li>
+</ul>
+
+<h4>운영 중</h4>
+<ul class="checklist">
+  <li>로그 파일 주기적 백업 및 보관 기간 정책 수립 (6개월 이상 권장)</li>
+  <li>로그 무결성 정기 검증 (웹 뷰어 <code>/verify</code> 메뉴 또는 <code>python3 log_viewer.py --verify</code>)</li>
+  <li>로그 파티션 용량 모니터링 (200 MB/파일 자동 분할)</li>
+  <li>방화벽 8888 포트 IP 제한 정기 점검</li>
+</ul>
+</section>
+
+<!-- ══════════════ 11. 보안 고려사항 ══════════════ -->
+<section id="security">
+<h2><span class="sec-num">11</span> 보안 고려사항</h2>
+
+<h3>로그 파일 보호</h3>
+<div class="code-wrap">
+<button class="copy-btn" onclick="copyCode(this)">복사</button>
+<pre><code># 감사 계정만 접근 허용
+chmod 700 /opt/audit/deploy_postgreSQL/logs/
+chown audituser:audituser /opt/audit/deploy_postgreSQL/logs/
+
+# append-only 설정 (삭제·수정 방지)
+sudo chattr +a /opt/audit/deploy_postgreSQL/logs/</code></pre>
+</div>
+
+<h3>보안 항목 요약</h3>
+<table>
+  <tr><th>항목</th><th>현재 구현</th><th>권고</th></tr>
+  <tr><td>웹 뷰어 인증</td><td><span class="hl-red">인증 없음</span></td><td>방화벽 IP 제한 필수 / nginx + Basic Auth 권고</td></tr>
+  <tr><td>로그 전송</td><td>HTTP 평문</td><td>nginx + HTTPS (내부망은 자체 서명 인증서 허용)</td></tr>
+  <tr><td>로그 무결성</td><td>SHA-256 해시 (파일 내부)</td><td>WORM 저장소 또는 외부 해시 레지스트리 권고</td></tr>
+  <tr><td>개인정보 저장</td><td>로그 파일에 원문 저장</td><td><code>chmod 700</code> + 감사 계정만 접근 / 보관기간 정책</td></tr>
+  <tr><td>Superset ↔ PG 구간</td><td>평문 전송</td><td>내부망 전용 — 외부 노출 절대 금지</td></tr>
+</table>
+
+<div class="info-box tip">
+  <strong>금융 규제 준수 참고</strong><br>
+  전자금융감독규정 §32 — 접근기록 6개월 이상 보관, 위·변조 방지(WORM 권고)<br>
+  개인정보보호법 §29 — 개인정보 포함 로그 접근통제, 전송 암호화 권고
+</div>
+</section>
+
+<!-- ══════════════ 12. 로그 스키마 ══════════════ -->
+<section id="schema">
+<h2><span class="sec-num">12</span> 로그 파일 스키마</h2>
+
+<p>파일 위치: <code>logs/audit_query_YYYYMMDD.jsonl</code> (JSON Lines, UTF-8, 200 MB 초과 시 <code>_001</code> 분할)</p>
+
+<div class="code-wrap">
+<pre><code>{
+  "log_id": "uuid4 (고유 식별자)",
+  "when": {
+    "start_time": "2026-04-28T09:15:30.123456",
+    "end_time":   "2026-04-28T09:15:30.165432",
+    "duration_ms": 42
+  },
+  "who": {
+    "user_id":   "superset_user",    // PostgreSQL 접속 계정
+    "user_name": "superset_user",
+    "user_role": "SupersetUser"
+  },
+  "where": {
+    "client_ip": "10.0.0.10",        // Superset 서버 IP
+    "hostname":  "superset-host",
+    "db_server": "10.0.0.5",         // PostgreSQL 서버 IP
+    "db_name":   "superset_db",
+    "db_schema": "public"
+  },
+  "what": {
+    "query_type":     "SELECT",
+    "operation_type": "조회",         // 한글 업무유형 자동 매핑
+    "sql":            "SELECT id, name FROM customers WHERE ...",
+    "parameters":     null,
+    "row_count":      25,             // SELECT: 조회 건수
+    "affected_rows":  0               // DML: 영향 행수
+  },
+  "how": {
+    "execution_method": "PG Proxy",  // "PG Proxy" | "PG Sniffer"
+    "application":      "FinanceApp v1.0.0",
+    "session_id":       "a1b2c3d4"
+  },
+  "why": {
+    "purpose":      "조회",
+    "reference_no": ""
+  },
+  "result": {
+    "status":        "SUCCESS",       // "SUCCESS" | "FAILURE"
+    "error_message": null,
+    "has_personal_info": false,
+    "personal_info_counts": {
+      "주민등록번호": 0, "카드번호": 0,
+      "계좌번호": 0,    "전화번호": 0, "이메일": 0
+    },
+    "result_count": 25,
+    "result_data":  ["값1", "값2", "..."]  // text/varchar 컬럼 값
+  },
+  "integrity_hash": "sha256(log_id + start_time + sql + status)"
+}</code></pre>
+</div>
+
+<h3>제약 사항</h3>
+<table>
+  <tr><th>항목</th><th>내용</th></tr>
+  <tr><td>SSL/TLS</td><td><code>sslmode=require</code> 환경에서 SQL 추출 불가 — 현재 환경(비암호화) 적합</td></tr>
+  <tr><td>바인드 변수 값</td><td>SQL 구조는 기록되나 실제 파라미터 값 추출 제한</td></tr>
+  <tr><td>대용량 SQL (방식 B)</td><td>여러 패킷 분할 시 일부 누락 가능</td></tr>
+  <tr><td>result_data</td><td>text/varchar 계열만 추출. bytea, jsonb 등 바이너리 타입 제외</td></tr>
+</table>
+
+<p style="margin-top:40px;color:#4a5f80;font-size:12px;text-align:center;border-top:1px solid #c5d5ef;padding-top:20px">
+  DB 쿼리 감사 로그 시스템 · Superset + PostgreSQL 전용 · v1.0<br>
+  Python 표준 라이브러리 전용 · 외부 패키지 없음 · 폐쇄망 운용 가능
+</p>
+</section>
+
+</div><!-- #content -->
+</div><!-- #main -->
+
+<script>
+// ── 코드 복사 ──
+function copyCode(btn) {
+  const pre = btn.nextElementSibling;
+  const text = pre.innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = '복사됨 ✓';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '복사'; btn.classList.remove('copied'); }, 1800);
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = '복사됨 ✓';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = '복사'; btn.classList.remove('copied'); }, 1800);
+  });
+}
+
+// ── 사이드바 활성 링크 ──
+const sections = document.querySelectorAll('section[id]');
+const navLinks = document.querySelectorAll('#sidebar nav a');
+
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      navLinks.forEach(a => a.classList.remove('active'));
+      const link = document.querySelector(`#sidebar nav a[href="#${e.target.id}"]`);
+      if (link) link.classList.add('active');
+    }
+  });
+}, { rootMargin: '-20% 0px -70% 0px' });
+
+sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>
