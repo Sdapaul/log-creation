@@ -29,7 +29,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
-from config import DB_SERVER as _CFG_SERVER, DB_NAME as _CFG_DBNAME, DB_SCHEMA as _CFG_SCHEMA
+from config import PG_HOST as _CFG_SERVER, PG_DB as _CFG_DBNAME, PG_SCHEMA as _CFG_SCHEMA
 from query_logger import write_query_log
 
 logging.basicConfig(
@@ -353,7 +353,7 @@ class _PgSession:
             write_query_log(
                 user_id          = self.pg_user,
                 user_name        = self.pg_user,
-                user_role        = "PgUser",
+                user_role        = "SupersetUser",
                 client_ip        = self.client_ip,
                 db_server        = self.db_server,
                 db_name          = self.db_name,

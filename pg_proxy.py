@@ -1,64 +1,65 @@
 """
-PostgreSQL Wire Protocol 패킷 스니퍼 - 원시 소켓(Raw Socket) 기반 감사 로그
+PostgreSQL 감사 프록시 — Superset ↔ PostgreSQL 쿼리 자동 감사 로그
 
-포트 5432 의 PostgreSQL Frontend/Backend Protocol v3 를 OS 레벨에서 수동 감청해
-실행된 SQL 을 감사 로그로 기록한다. 앱과 PostgreSQL 서버 설정을 전혀 변경하지 않아도 된다.
+[구성]
+  Superset ──TCP(평문)──▶  PgProxy :5433  ──TCP──▶  PostgreSQL :5432 (Azure/RedHat9.7)
+
+[Superset 설정 변경]
+  Settings → Database Connections → SQLAlchemy URI 를 프록시 주소로 변경:
+    postgresql+psycopg2://user:pass@<프록시IP>:5433/dbname?sslmode=disable
+  Superset 와 DB 서버 간 암호화가 없으므로(sslmode=disable) 정상 동작.
+
+[Oracle 프록시와 비교]
+    oracle_proxy.py : Oracle TNS 프로토콜 (포트 1521/1522)
+    pg_proxy.py     : PostgreSQL Wire Protocol v3 (포트 5432/5433)
 
 [제약]
-  · SSL/TLS 암호화 연결(sslmode=require/verify-*): SQL 추출 불가
-  · 비암호화 연결(sslmode=disable 또는 서버가 ssl=off) 에서만 동작
-  · Linux: root 또는 CAP_NET_RAW 권한 필요
-  · Windows: 관리자 권한 필요
+  · SSL/TLS 연결(sslmode=require/verify-*): SQL 추출 불가
+  · 평문 연결(sslmode=disable) 전용 — 현재 Superset ↔ Azure PG 구성과 일치
+  · root 권한 불필요 (pg_sniffer.py 와 달리 일반 사용자로 실행 가능)
+  · 프록시가 재시작되면 기존 Superset 연결이 끊김 (재접속 필요)
 
 [구동]
-  Linux : sudo python3 pg_sniffer.py --pg-port 5432
-  Windows: (관리자 CMD) python pg_sniffer.py --pg-port 5432 --bind-ip 0.0.0.0
-
-[oracle_proxy.py 와 달리 독립 모듈]
-  pg_sniffer.py 는 oracle_proxy.py 를 import 하지 않는다.
-  PostgreSQL Wire Protocol 파서를 내부에 자체 구현한다.
+  python pg_proxy.py
+  python pg_proxy.py --pg-host 10.0.0.1 --pg-port 5432 --listen-port 5433
+  python pg_proxy.py --pg-host azure-pg.internal --db-name superset --db-schema public
 """
 
+import asyncio
 import argparse
 import logging
-import socket
 import struct
-import sys
 import uuid
-from collections import defaultdict
 from datetime import datetime
 from typing import Optional
 
-from config import PG_HOST as _CFG_SERVER, PG_DB as _CFG_DBNAME, PG_SCHEMA as _CFG_SCHEMA
+from config import PG_HOST as _CFG_PG_HOST, PG_PORT as _CFG_PG_PORT
+from config import PG_DB as _CFG_PG_DB, PG_SCHEMA as _CFG_PG_SCHEMA
 from query_logger import write_query_log
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [PgSniffer] %(levelname)s %(message)s",
+    format="%(asctime)s [PgProxy] %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
 )
-_log = logging.getLogger("pg_sniffer")
+_log = logging.getLogger("pg_proxy")
 
-# PostgreSQL SSLRequest 코드 (protocol version 필드에 들어오는 특수값)
-_PG_SSL_REQUEST_CODE = 80877103    # 0x04D2162F
-_MAX_MSG_SIZE        = 16_777_216  # 16 MB (PostgreSQL 단일 메시지 최대)
+_PG_SSL_REQUEST_CODE = 80877103     # 0x04D2162F
+_MAX_MSG_SIZE        = 16_777_216   # 16 MB
 
 
 # ══════════════════════════════════════════════════════════════════
-# 스트림 버퍼 — 클라이언트→서버 방향
+# PostgreSQL Wire Protocol 스트림 버퍼
+# (pg_sniffer.py 와 동일 구조 — 프록시는 TCP 스트림을 직접 수신하므로
+#  raw socket/IP 파싱 없이 메시지 단위 분리만 수행)
 # ══════════════════════════════════════════════════════════════════
 
 class _ClientBuffer:
-    """
-    PostgreSQL 클라이언트→서버 스트림을 메시지 단위로 분리한다.
-
-    시작 메시지(Startup / SSLRequest): Int32 length + body  (type byte 없음)
-    이후 메시지: Byte1 type + Int32 length (포함) + body
-    """
+    """클라이언트→서버 스트림을 PostgreSQL 메시지 단위로 분리한다."""
 
     _ST_STARTUP = 0
     _ST_NORMAL  = 1
-    _ST_SSL     = 2   # SSL 암호화 진행 중 — 파싱 불가
+    _ST_SSL     = 2
 
     def __init__(self):
         self._buf   = bytearray()
@@ -85,7 +86,6 @@ class _ClientBuffer:
                 del self._buf[:msg_len]
                 if code == _PG_SSL_REQUEST_CODE:
                     out.append(('ssl_request', b''))
-                    # state 변경은 서버 'S' 응답 수신 시 set_ssl() 호출
                 else:
                     out.append(('startup', payload))
                     self._state = self._ST_NORMAL
@@ -94,7 +94,7 @@ class _ClientBuffer:
                 if len(self._buf) < 5:
                     break
                 mtype = chr(self._buf[0])
-                mlen  = struct.unpack_from(">I", self._buf, 1)[0]  # length includes itself
+                mlen  = struct.unpack_from(">I", self._buf, 1)[0]
                 total = 1 + mlen
                 if mlen < 4 or total > _MAX_MSG_SIZE:
                     self._buf.clear()
@@ -113,17 +113,8 @@ class _ClientBuffer:
         self._state = self._ST_SSL
 
 
-# ══════════════════════════════════════════════════════════════════
-# 스트림 버퍼 — 서버→클라이언트 방향
-# ══════════════════════════════════════════════════════════════════
-
 class _ServerBuffer:
-    """
-    PostgreSQL 서버→클라이언트 스트림을 메시지 단위로 분리한다.
-
-    SSLRequest 에 대한 응답은 단일 바이트 'N'(거부) 또는 'S'(수락).
-    이후 모든 메시지: Byte1 type + Int32 length (포함) + body
-    """
+    """서버→클라이언트 스트림을 PostgreSQL 메시지 단위로 분리한다."""
 
     _ST_SSL_RESPONSE = 0
     _ST_NORMAL       = 1
@@ -181,21 +172,21 @@ class _ServerBuffer:
 
 class _PgSession:
     """
-    하나의 PostgreSQL TCP 연결(세션)에 대한 상태를 관리한다.
+    Superset ↔ PostgreSQL 세션의 쿼리 실행 상태를 추적한다.
 
     Simple Query 흐름:
       클라이언트 'Q' → SQL 기록 시작
       서버 'C'(CommandComplete) → 로그 기록
 
-    Extended Query 흐름:
-      클라이언트 'P'(Parse) → SQL 저장 (prepared statement)
-      클라이언트 'E'(Execute) → SQL 기록 시작
+    Extended Query 흐름 (Superset/SQLAlchemy가 주로 사용):
+      클라이언트 'P'(Parse) → prepared statement SQL 저장
+      클라이언트 'E'(Execute) → SQL 실행 시작
       서버 'C'(CommandComplete) → 로그 기록
     """
 
-    def __init__(self, client_ip: str, db_server: str, db_name: str, db_schema: str):
+    def __init__(self, client_ip: str, pg_host: str, db_name: str, db_schema: str):
         self.client_ip  = client_ip
-        self.db_server  = db_server
+        self.pg_host    = pg_host
         self.db_name    = db_name
         self.db_schema  = db_schema
         self.session_id = str(uuid.uuid4())[:8]
@@ -213,7 +204,7 @@ class _PgSession:
         self._named_stmts: dict[str, str] = {}
         self._unnamed_sql: str            = ""
 
-    # ── 클라이언트 메시지 처리 ───────────────────────────────────
+    # ── 클라이언트 메시지 처리 ────────────────────────────────────
 
     def on_client(self, mtype: str, payload: bytes) -> None:
         if self._ssl_active:
@@ -252,12 +243,16 @@ class _PgSession:
         elif mtype == 'X':                          # Terminate
             self.flush()
 
-    # ── 서버 메시지 처리 ─────────────────────────────────────────
+    # ── 서버 메시지 처리 ──────────────────────────────────────────
 
     def on_server(self, mtype: str, payload: bytes) -> None:
         if mtype == 'ssl_active':
             self._ssl_active = True
-            _log.warning("[%s:%s] SSL 암호화 연결 — SQL 캡처 불가", self.client_ip, self.session_id)
+            _log.warning(
+                "[%s/%s] SSL 암호화 연결 — SQL 캡처 불가 "
+                "(Superset DB URI 에 sslmode=disable 추가 필요)",
+                self.client_ip, self.session_id,
+            )
             return
 
         if self._ssl_active:
@@ -277,9 +272,10 @@ class _PgSession:
             if self._sql:
                 self._write_log()
 
-    # ── 내부 ────────────────────────────────────────────────────
+    # ── 내부 ──────────────────────────────────────────────────────
 
     def _parse_startup(self, payload: bytes) -> None:
+        """Startup 메시지에서 pg_user, db_name 을 추출한다."""
         parts = payload.split(b'\x00')
         i = 0
         while i + 1 < len(parts):
@@ -302,6 +298,7 @@ class _PgSession:
         self._result_data = []
 
     def _on_datarow(self, payload: bytes) -> None:
+        """DataRow 메시지에서 셀 값을 추출해 누적한다."""
         if len(payload) < 2:
             return
         num_cols = struct.unpack_from(">H", payload, 0)[0]
@@ -309,7 +306,7 @@ class _PgSession:
         for _ in range(num_cols):
             if off + 4 > len(payload):
                 break
-            col_len = struct.unpack_from(">i", payload, off)[0]  # signed; NULL = -1
+            col_len = struct.unpack_from(">i", payload, off)[0]   # signed; NULL = -1
             off += 4
             if col_len < 0:
                 continue
@@ -322,8 +319,7 @@ class _PgSession:
         self._row_count += 1
 
     def _on_complete(self, tag: str) -> None:
-        # tag 예: "SELECT 10" / "INSERT 0 1" / "UPDATE 3" / "DELETE 2"
-        # BEGIN / COMMIT / ROLLBACK 은 로그 불필요
+        # tag 예: "SELECT 10" / "INSERT 0 1" / "UPDATE 3"
         parts = tag.split()
         if not parts:
             return
@@ -346,8 +342,7 @@ class _PgSession:
         if not self._sql or not self._start:
             return
         end = datetime.now()
-        sql = self._sql
-        is_select = sql.strip().split()[0].upper() == "SELECT" if sql.strip() else False
+        is_select = self._sql.strip().split()[0].upper() == "SELECT" if self._sql.strip() else False
 
         try:
             write_query_log(
@@ -355,12 +350,12 @@ class _PgSession:
                 user_name        = self.pg_user,
                 user_role        = "SupersetUser",
                 client_ip        = self.client_ip,
-                db_server        = self.db_server,
+                db_server        = self.pg_host,
                 db_name          = self.db_name,
                 db_schema        = self.db_schema,
-                sql              = sql,
+                sql              = self._sql,
                 parameters       = None,
-                execution_method = "PG Sniffer",
+                execution_method = "PG Proxy",
                 session_id       = self.session_id,
                 purpose          = "",
                 reference_no     = "",
@@ -382,6 +377,7 @@ class _PgSession:
         self._result_data = []
 
     def flush(self) -> None:
+        """세션 종료 시 미완료 쿼리를 로그에 기록한다."""
         if self._sql:
             self._write_log()
 
@@ -408,175 +404,138 @@ def _parse_error_response(payload: bytes) -> dict[str, str]:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 원시 소켓 생성  (packet_sniffer.py 와 동일 방식)
+# 프록시 서버
 # ══════════════════════════════════════════════════════════════════
 
-def _create_raw_socket(bind_ip: str = "") -> socket.socket:
-    if sys.platform == "linux":
-        try:
-            return socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
-        except PermissionError:
-            _log.error("root 권한이 필요합니다. sudo 로 실행하세요.")
-            sys.exit(1)
-    elif sys.platform == "win32":
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
-            ip = bind_ip or socket.gethostbyname(socket.gethostname())
-            sock.bind((ip, 0))
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-            sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
-            _log.info("바인딩 주소: %s", ip)
-            return sock
-        except PermissionError:
-            _log.error("관리자 권한으로 실행하세요.")
-            sys.exit(1)
-    else:
-        _log.error("지원하지 않는 플랫폼: %s", sys.platform)
-        sys.exit(1)
-
-
-def _parse_packet(data: bytes) -> Optional[tuple]:
-    """raw 패킷 → (src_ip, src_port, dst_ip, dst_port, tcp_flags, payload) 또는 None"""
-    off = 0
-    if sys.platform == "linux":
-        if len(data) < 14:
-            return None
-        if struct.unpack_from("!H", data, 12)[0] != 0x0800:  # IPv4 만
-            return None
-        off = 14
-
-    if len(data) - off < 20:
-        return None
-    ip0    = data[off]
-    ip_ver = (ip0 >> 4) & 0xF
-    ip_ihl = (ip0 & 0xF) * 4
-    if ip_ver != 4 or data[off + 9] != 6:   # IPv4 + TCP
-        return None
-
-    src_ip = socket.inet_ntoa(data[off + 12: off + 16])
-    dst_ip = socket.inet_ntoa(data[off + 16: off + 20])
-    tcp_off = off + ip_ihl
-    if len(data) - tcp_off < 20:
-        return None
-
-    src_port    = struct.unpack_from("!H", data, tcp_off)[0]
-    dst_port    = struct.unpack_from("!H", data, tcp_off + 2)[0]
-    data_offset = ((data[tcp_off + 12] >> 4) & 0xF) * 4
-    tcp_flags   = data[tcp_off + 13]
-    payload     = data[tcp_off + data_offset:]
-
-    return src_ip, src_port, dst_ip, dst_port, tcp_flags, payload
-
-
-# ══════════════════════════════════════════════════════════════════
-# PostgreSQL 패킷 스니퍼 메인 클래스
-# ══════════════════════════════════════════════════════════════════
-
-class PgSniffer:
+class PgProxy:
     """
-    원시 소켓으로 PostgreSQL Wire Protocol 패킷을 수동 수신해 감사 로그를 기록한다.
+    Superset → PostgreSQL 감사 프록시 서버.
 
-    세션 관리:
-      · 세션 키: (client_ip, client_port)
-      · 각 세션은 C→S(_ClientBuffer), S→C(_ServerBuffer) 두 방향 버퍼를 가진다
-      · FIN/RST 수신 시 해당 세션을 정리하고 미완료 로그를 기록
+    oracle_proxy.py 와 동일한 asyncio 비동기 TCP 프록시 구조.
+    클라이언트(Superset) 연결 1개당 2개의 coroutine(C→PG, PG→C)이 동시 실행된다.
+
+    raw socket 없이 TCP 스트림을 직접 수신하므로 root 권한이 불필요하다.
     """
 
     def __init__(
         self,
-        pg_port:   int = 5432,
-        db_server: str = "",
-        db_name:   str = "",
-        db_schema: str = "",
-        bind_ip:   str = "",
+        listen_host: str = "0.0.0.0",
+        listen_port: int = 5433,
+        pg_host:     str = "localhost",
+        pg_port:     int = 5432,
+        db_name:     str = "",
+        db_schema:   str = "",
     ):
-        self._pg_port   = pg_port
-        self._db_server = db_server or _CFG_SERVER or "localhost"
-        self._db_name   = db_name   or _CFG_DBNAME or "postgres"
-        self._db_schema = db_schema or _CFG_SCHEMA or "public"
-        self._bind_ip   = bind_ip
+        self.listen_host = listen_host
+        self.listen_port = listen_port
+        self.pg_host     = pg_host
+        self.pg_port     = pg_port
+        self.db_name     = db_name   or _CFG_PG_DB    or "postgres"
+        self.db_schema   = db_schema or _CFG_PG_SCHEMA or "public"
 
-        self._sessions: dict[tuple, _PgSession]    = {}
-        self._c_bufs:   dict[tuple, _ClientBuffer] = defaultdict(_ClientBuffer)
-        self._s_bufs:   dict[tuple, _ServerBuffer] = defaultdict(_ServerBuffer)
+    async def start(self) -> None:
+        server = await asyncio.start_server(
+            self._handle_client,
+            self.listen_host,
+            self.listen_port,
+        )
+        addrs = [str(s.getsockname()) for s in server.sockets]
+        _log.info("PG 프록시 시작: %s → %s:%d", addrs, self.pg_host, self.pg_port)
+        _log.info(
+            "Superset DB URI 예시: "
+            "postgresql+psycopg2://user:pass@<프록시IP>:%d/%s?sslmode=disable",
+            self.listen_port, self.db_name,
+        )
+        async with server:
+            await server.serve_forever()
 
-    def start(self) -> None:
-        sock = _create_raw_socket(self._bind_ip)
-        _log.info("PostgreSQL 스니퍼 시작 (포트 %d 감청 중)", self._pg_port)
-        _log.info("종료: Ctrl+C")
+    async def _handle_client(
+        self,
+        c_reader: asyncio.StreamReader,
+        c_writer: asyncio.StreamWriter,
+    ) -> None:
+        """Superset 클라이언트 연결 1개를 처리한다."""
+        peer      = c_writer.get_extra_info('peername')
+        client_ip = peer[0] if peer else "UNKNOWN"
+        session   = _PgSession(client_ip, self.pg_host, self.db_name, self.db_schema)
+        c_buf     = _ClientBuffer()
+        s_buf     = _ServerBuffer()
+        _log.info("[%s] Superset 연결 수립", client_ip)
+
         try:
-            while True:
+            pg_reader, pg_writer = await asyncio.open_connection(self.pg_host, self.pg_port)
+        except Exception as exc:
+            _log.error("[%s] PostgreSQL(%s:%d) 연결 실패: %s",
+                       client_ip, self.pg_host, self.pg_port, exc)
+            c_writer.close()
+            return
+
+        async def _c2pg() -> None:
+            """Superset → PostgreSQL 방향: 클라이언트 메시지 파싱 후 전달."""
+            try:
+                while True:
+                    data = await c_reader.read(65536)
+                    if not data:
+                        break
+                    for mtype, payload in c_buf.feed(data):
+                        if mtype == 'ssl_request':
+                            s_buf.expect_ssl_response()
+                        session.on_client(mtype, payload)
+                    pg_writer.write(data)
+                    await pg_writer.drain()
+            except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+                pass
+            except Exception as exc:
+                _log.debug("[%s] C→PG 오류: %s", client_ip, exc)
+            finally:
                 try:
-                    data, _ = sock.recvfrom(65535)
-                    self._process(data)
-                except KeyboardInterrupt:
-                    raise
-                except Exception as exc:
-                    _log.debug("패킷 처리 오류: %s", exc)
-        except KeyboardInterrupt:
-            _log.info("종료 — 미완료 세션 로그 기록 중...")
-            self._flush_all()
-        finally:
-            if sys.platform == "win32":
-                try:
-                    sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+                    pg_writer.close()
+                    await pg_writer.wait_closed()
                 except Exception:
                     pass
-            sock.close()
 
-    def _process(self, data: bytes) -> None:
-        parsed = _parse_packet(data)
-        if not parsed:
-            return
-        src_ip, src_port, dst_ip, dst_port, flags, payload = parsed
+        async def _pg2c() -> None:
+            """PostgreSQL → Superset 방향: 서버 메시지 파싱 후 전달."""
+            try:
+                while True:
+                    data = await pg_reader.read(65536)
+                    if not data:
+                        break
+                    for mtype, payload in s_buf.feed(data):
+                        if mtype == 'ssl_active':
+                            c_buf.set_ssl()
+                        session.on_server(mtype, payload)
+                    c_writer.write(data)
+                    await c_writer.drain()
+            except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+                pass
+            except Exception as exc:
+                _log.debug("[%s] PG→C 오류: %s", client_ip, exc)
+            finally:
+                try:
+                    c_writer.close()
+                    await c_writer.wait_closed()
+                except Exception:
+                    pass
 
-        if dst_port == self._pg_port:
-            key, direction, client_ip = (src_ip, src_port), "c2s", src_ip
-        elif src_port == self._pg_port:
-            key, direction, client_ip = (dst_ip, dst_port), "s2c", dst_ip
-        else:
-            return
+        t_c2pg = asyncio.create_task(_c2pg())
+        t_pg2c = asyncio.create_task(_pg2c())
 
-        # FIN / RST → 세션 종료
-        if flags & 0x01 or flags & 0x04:
-            if key in self._sessions:
-                self._sessions[key].flush()
-                del self._sessions[key]
-            self._c_bufs.pop(key, None)
-            self._s_bufs.pop(key, None)
-            return
-
-        if not payload:
-            return
-
-        if key not in self._sessions:
-            self._sessions[key] = _PgSession(
-                client_ip = client_ip,
-                db_server = self._db_server,
-                db_name   = self._db_name,
-                db_schema = self._db_schema,
+        try:
+            done, pending = await asyncio.wait(
+                [t_c2pg, t_pg2c],
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            _log.info("[%s:%d] 새 PostgreSQL 연결 감지", *key)
-
-        session = self._sessions[key]
-
-        if direction == "c2s":
-            for mtype, mpayload in self._c_bufs[key].feed(payload):
-                if mtype == 'ssl_request':
-                    self._s_bufs[key].expect_ssl_response()
-                session.on_client(mtype, mpayload)
-        else:
-            for mtype, mpayload in self._s_bufs[key].feed(payload):
-                if mtype == 'ssl_active':
-                    self._c_bufs[key].set_ssl()
-                session.on_server(mtype, mpayload)
-
-    def _flush_all(self) -> None:
-        for s in self._sessions.values():
-            s.flush()
-        self._sessions.clear()
-        self._c_bufs.clear()
-        self._s_bufs.clear()
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            session.flush()
+            _log.info("[%s] 연결 종료 (세션 %s, 사용자 %s)",
+                      client_ip, session.session_id, session.pg_user)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -585,28 +544,39 @@ class PgSniffer:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="PostgreSQL Wire Protocol 패킷 스니퍼 — 앱·서버 수정 없이 쿼리 감사 로그 수집",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "PostgreSQL 감사 프록시 — Superset 쿼리 자동 로깅\n"
+            "암호화 없는 연결(sslmode=disable) 전용 | root 권한 불필요"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--pg-port",   type=int, default=5432,
-                        help="감청할 PostgreSQL 리스너 포트")
-    parser.add_argument("--db-server", default=_CFG_SERVER or "localhost",
-                        help="로그에 기록할 PostgreSQL 서버 명칭")
-    parser.add_argument("--db-name",   default=_CFG_DBNAME or "postgres",
-                        help="로그에 기록할 DB 이름")
-    parser.add_argument("--db-schema", default=_CFG_SCHEMA or "public",
-                        help="로그에 기록할 스키마")
-    parser.add_argument("--bind-ip",   default="",
-                        help="Windows 전용: 바인딩할 인터페이스 IP")
+    parser.add_argument("--listen-host", default="0.0.0.0",
+                        help="프록시 바인딩 주소 (기본: 0.0.0.0)")
+    parser.add_argument("--listen-port", type=int, default=5433,
+                        help="Superset이 연결할 프록시 포트 (기본: 5433)")
+    parser.add_argument("--pg-host", default=_CFG_PG_HOST or "localhost",
+                        help="실제 PostgreSQL 서버 호스트 (config.py PG_HOST)")
+    parser.add_argument("--pg-port", type=int, default=_CFG_PG_PORT or 5432,
+                        help="실제 PostgreSQL 서버 포트 (기본: 5432)")
+    parser.add_argument("--db-name",   default=_CFG_PG_DB or "postgres",
+                        help="로그에 기록할 DB 이름 (기본: Startup 메시지에서 자동 추출)")
+    parser.add_argument("--db-schema", default=_CFG_PG_SCHEMA or "public",
+                        help="로그에 기록할 스키마 (기본: public)")
     args = parser.parse_args()
 
-    PgSniffer(
-        pg_port   = args.pg_port,
-        db_server = args.db_server,
-        db_name   = args.db_name,
-        db_schema = args.db_schema,
-        bind_ip   = args.bind_ip,
-    ).start()
+    proxy = PgProxy(
+        listen_host = args.listen_host,
+        listen_port = args.listen_port,
+        pg_host     = args.pg_host,
+        pg_port     = args.pg_port,
+        db_name     = args.db_name,
+        db_schema   = args.db_schema,
+    )
+
+    try:
+        asyncio.run(proxy.start())
+    except KeyboardInterrupt:
+        _log.info("프록시 종료")
 
 
 if __name__ == "__main__":
